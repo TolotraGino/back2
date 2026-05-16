@@ -1,0 +1,12 @@
+#root {
+  min-height: 100vh;
+}
+
+.app-wrapper {
+  min-height: 100vh;
+  background: radial-gradient(circle at top left, #f7f5f2 0%, #eff3f7 45%, #e9eef4 100%);
+}
+
+.app-main {
+  padding: 18px 0 40px;
+}

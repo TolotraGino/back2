@@ -1,0 +1,6 @@
+nom,date_availability_produit,reference,prix_ttc,Taxe,categorie,prix_achat
+"Produit Test 1","2026-05-11","REF-001",99.90,20,1,50.00
+"Produit Test 2","2026-05-11","REF-002",149.90,20,2,75.00
+"Produit Test 3","2026-05-12","REF-003",49.90,10,1,30.00
+"Produit Test 4","2026-05-12","REF-004",199.90,20,3,100.00
+"Produit Test 5","2026-05-13","REF-005",299.90,20,2,150.00

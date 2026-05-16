@@ -1,0 +1,104 @@
+.landing-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 2rem 1.2rem;
+  position: relative;
+  overflow: hidden;
+  background: radial-gradient(circle at top left, #fff6ec 0%, #f3f5f8 45%, #e7edf4 100%);
+}
+
+.landing-shell::before,
+.landing-shell::after {
+  content: '';
+  position: absolute;
+  width: 520px;
+  height: 520px;
+  border-radius: 50%;
+  background: rgba(47, 125, 111, 0.08);
+  filter: blur(0.5px);
+  z-index: 0;
+}
+
+.landing-shell::before {
+  top: -220px;
+  right: -140px;
+}
+
+.landing-shell::after {
+  bottom: -240px;
+  left: -140px;
+  background: rgba(236, 139, 63, 0.12);
+}
+
+.landing-card {
+  position: relative;
+  z-index: 1;
+  background: #fff;
+  padding: 2.6rem 2.2rem;
+  border-radius: 18px;
+  box-shadow: 0 20px 46px rgba(15, 23, 42, 0.14);
+  text-align: center;
+  width: min(460px, 100%);
+  border: 1px solid rgba(23, 33, 47, 0.08);
+  animation: landing-pop 0.5s ease both;
+}
+
+@keyframes landing-pop {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.landing-card h1 {
+  margin: 0;
+  font-size: 2rem;
+  letter-spacing: -0.03em;
+}
+
+.landing-card p {
+  color: #556577;
+  margin-top: 0.7rem;
+}
+
+.landing-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.8rem;
+  justify-content: center;
+  margin-top: 1.6rem;
+}
+
+.landing-button {
+  padding: 0.75rem 1.2rem;
+  background: #2f7d6f;
+  color: #fff;
+  text-decoration: none;
+  border-radius: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  box-shadow: 0 12px 20px rgba(47, 125, 111, 0.22);
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.landing-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 30px rgba(47, 125, 111, 0.28);
+  background: #256657;
+}
+
+.landing-button.landing-secondary {
+  background: #233247;
+  box-shadow: 0 12px 20px rgba(35, 50, 71, 0.22);
+}
+
+.landing-button.landing-secondary:hover {
+  background: #1b2637;
+  box-shadow: 0 16px 30px rgba(35, 50, 71, 0.28);
+}

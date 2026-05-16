@@ -1,0 +1,5 @@
+name,price,description,description_short,ean13,reference,quantity
+Produit A,19.99,"Description longue du produit A, avec détails","Courte description A",1234567890001,REF-A-001,100
+Produit B,29.99,"Description du produit B avec prix special","Description rapide B",1234567890002,REF-B-001,50
+Produit C,49.99,"Produit premium, haute qualite","Premium C",1234567890003,REF-C-001,25
+Produit D,9.99,"Produit economique, entree gamme","Economique D",1234567890004,REF-D-001,200
