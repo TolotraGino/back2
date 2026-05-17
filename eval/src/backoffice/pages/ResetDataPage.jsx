@@ -4,7 +4,6 @@ import { apiRequest, apiRequestRaw } from '../../services/apiService.js'
 
 const PROTECTED_IDS = {
   customers: [1],
-  products: [1, 2],
   orders: [],
   categories: [1, 2],
   order_states: [1, 2, 3, 4, 5, 6, 7, 8],

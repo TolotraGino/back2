@@ -7,7 +7,12 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost/Back2',
+        target: 'http://localhost/back',
+        changeOrigin: true,
+        secure: false,
+      },
+      '/index.php': {
+        target: 'http://localhost/back',
         changeOrigin: true,
         secure: false,
       },
