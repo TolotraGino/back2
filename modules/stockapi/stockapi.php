@@ -9,7 +9,7 @@ class Stockapi extends Module
     {
         $this->name = 'stockapi';
         $this->tab = 'administration';
-        $this->version = '1.0.0';
+        $this->version = '1.1.0';
         $this->author = 'Custom';
         $this->need_instance = 0;
         parent::__construct();

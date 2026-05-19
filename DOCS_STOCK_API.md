@@ -176,17 +176,29 @@ Le proxy Vite redirige automatiquement :
 
 ---
 
-## 8. Variables d'environnement React
+## 8. Variables d'environnement React — modifier le token
 
-Fichier `.env` ou `.env.local` dans `eval/` :
+**Fichier à éditer :**
 
-```env
-VITE_API_BASE_URL=http://localhost:5173/api
-VITE_API_TOKEN=<CLE_WEBSERVICE_PS>
+```
+/home/gino/Documents/GitHub/back2/eval/.env
 ```
 
-La clé webservice se trouve dans :  
-**PS back-office → Paramètres avancés → Services Web**
+```env
+VITE_API_BASE_URL=/api
+VITE_API_TOKEN=HVEU9W49DDB95SY8R3MW15HAAWLTD4LZ   ← changer cette valeur
+VITE_API_AUTH_SCHEME=Basic
+```
+
+Pour obtenir ou créer une nouvelle clé :  
+**PS back-office → Paramètres avancés → Services Web → Ajouter une clé**
+
+Après modification du `.env`, relancer le serveur de dev :
+
+```bash
+cd /home/gino/Documents/GitHub/back2/eval
+npm run dev
+```
 
 ---
 

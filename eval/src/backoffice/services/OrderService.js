@@ -1,6 +1,6 @@
 import { createApiClient } from '../../services/apiService.js'
 import { Order } from '../models/Order.js'
-import { parseXml, serializeXml } from '../../shared/xml/xmlUtils.js'
+import { parseXml } from '../../shared/xml/xmlUtils.js'
 
 const CSV_ORDER_DATE_MAP_KEY = 'bo_csv_order_date_map_v1'
 
@@ -57,7 +57,11 @@ export class OrderService {
     if (!listResponse.ok) return { ok: false, status: listResponse.status, data: [] }
 
     const ids = this.parseOrderList(listResponse.text)
-    const details = await Promise.all(ids.map((id) => this.apiClient.requestRaw(`/orders/${id}`)))
+    const details = []
+    for (let i = 0; i < ids.length; i += 3) {
+      const batch = await Promise.all(ids.slice(i, i + 3).map((id) => this.apiClient.requestRaw(`/orders/${id}`)))
+      details.push(...batch)
+    }
     const csvMap = this.loadCsvOrderDateMap()
     const orders = details
       .filter((response) => response.ok)
@@ -67,30 +71,25 @@ export class OrderService {
     return { ok: true, status: 200, data: orders }
   }
 
+  // Utilise le module mon_order_state : POST /api/order_state_update
+  // Déclenche changeIdOrderState() côté PS → stock diminue à l'état 5 (Livré)
   async updateOrderState(orderId, nextStateId) {
-    const detailResponse = await this.apiClient.requestRaw(`/orders/${orderId}`)
-    if (!detailResponse.ok) {
-      return { ok: false, status: detailResponse.status, errorText: detailResponse.text }
-    }
+    const payload = { id_order: orderId, id_order_state: nextStateId }
 
-    const doc = parseXml(detailResponse.text)
-    const order = doc.getElementsByTagName('order')[0]
-    if (!order) return { ok: false, status: 0, errorText: 'Order node missing' }
+    console.group(`[OrderService] updateOrderState — commande #${orderId} → état ${nextStateId}`)
+    console.log('→ Requête envoyée :', payload)
 
-    const currentState = order.getElementsByTagName('current_state')[0]
-    if (currentState) {
-      currentState.textContent = String(nextStateId)
-      currentState.setAttribute('xlink:href', `/api/order_states/${nextStateId}`)
-    }
-
-    const body = serializeXml(doc)
-    const updateResponse = await this.apiClient.requestRaw(`/orders/${orderId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/xml' },
-      body,
+    const response = await this.apiClient.requestRaw('/order_state_update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     })
 
-    return { ok: updateResponse.ok, status: updateResponse.status, errorText: updateResponse.text }
+    console.log(`← Réponse HTTP ${response.status} (${response.ok ? 'OK' : 'ERREUR'})`)
+    console.log('← Corps de la réponse :', response.text)
+    console.groupEnd()
+
+    return { ok: response.ok, status: response.status, errorText: response.text }
   }
 
   groupByDay(orders = []) {

@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import JSZip from 'jszip';
-import { apiRequestRaw } from '../../services/apiService.js';
+import { apiRequestRaw, getApiConfig } from '../../services/apiService.js';
 import { ORDER_STATES } from '../constants/orderStates.js';
 import { extractApiErrorMessage, getFirstIdFromXml, getXmlText, parseXml, serializeXml } from '../../shared/xml/xmlUtils.js';
 
@@ -20,6 +20,7 @@ export default function CSVImportPage() {
   const [imagesZipName, setImagesZipName] = useState('');
   const [imagesByReference, setImagesByReference] = useState({});
   const [imagesImportResults, setImagesImportResults] = useState(null);
+  const [progress, setProgress] = useState({ done: 0, total: 0, label: '' });
 
   // useRef : persiste entre les renders sans déclencher de re-render
   // taxRateCache : taux CSV (toFixed(4)) → id groupe TVA PS
@@ -161,15 +162,32 @@ export default function CSVImportPage() {
     return r.text;
   };
 
-  const apiPostXml = async (path, xml, tagName) => {
-    const r = await apiRequestRaw(path, { method: 'POST', headers: { 'Content-Type': 'application/xml' }, body: xml });
-    if (!r.ok) throw new Error(`HTTP ${r.status}${extractApiErrorMessage(r.text) ? ' - ' + extractApiErrorMessage(r.text) : ''}`);
-    return getFirstIdFromXml(parseXml(r.text), tagName);
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+  const apiPostXml = async (path, xml, tagName, retries = 3) => {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      const r = await apiRequestRaw(path, { method: 'POST', headers: { 'Content-Type': 'application/xml' }, body: xml });
+      if ((r.status === 502 || r.status === 503) && attempt < retries - 1) {
+        await sleep(1500);
+        continue;
+      }
+      if (!r.ok) throw new Error(`HTTP ${r.status}${extractApiErrorMessage(r.text) ? ' - ' + extractApiErrorMessage(r.text) : ''}`);
+      return getFirstIdFromXml(parseXml(r.text), tagName);
+    }
+    throw new Error('HTTP 502 (échec après 3 tentatives)');
   };
 
-  const apiPutXml = async (path, xml) => {
-    const r = await apiRequestRaw(path, { method: 'PUT', headers: { 'Content-Type': 'application/xml' }, body: xml });
-    if (!r.ok) throw new Error(`HTTP ${r.status}${extractApiErrorMessage(r.text) ? ' - ' + extractApiErrorMessage(r.text) : ''}`);
+  const apiPutXml = async (path, xml, retries = 3) => {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      const r = await apiRequestRaw(path, { method: 'PUT', headers: { 'Content-Type': 'application/xml' }, body: xml });
+      if ((r.status === 502 || r.status === 503) && attempt < retries - 1) {
+        await sleep(1500);
+        continue;
+      }
+      if (!r.ok) throw new Error(`HTTP ${r.status}${extractApiErrorMessage(r.text) ? ' - ' + extractApiErrorMessage(r.text) : ''}`);
+      return;
+    }
+    throw new Error('HTTP 502 (échec après 3 tentatives)');
   };
 
   // Supprime tous les champs read-only PS8 d'un nœud produit avant PUT
@@ -1096,7 +1114,7 @@ export default function CSVImportPage() {
 
   // ── IMPORT ────────────────────────────────────────────────────────────────
 
-  const importCatalogCsv = async () => {
+  const importCatalogCsv = async (onProgress = () => {}) => {
     const importResults = {
       products: { total: products.length, success: 0, failed: 0, errors: [] },
       variants:  { total: variants.length,  success: 0, failed: 0, errors: [] },
@@ -1114,159 +1132,200 @@ export default function CSVImportPage() {
       variants.filter(v => String(v.specificite||'').trim() && String(v.karazany||'').trim()).map(v => v.reference)
     );
 
-    // ── Boucle produits ──────────────────────────────────────────────────
+    // ── Pré-chargement ───────────────────────────────────────────────────
+    // Une seule passe pour remplir tous les caches avant les boucles
+    onProgress('Pre-chargement produits existants...');
+    try {
+      const xml = await apiGetXml('/products/?display=full');
+      parseXml(xml).querySelectorAll('product').forEach(p => {
+        const ref = (p.querySelector('reference')?.textContent || '').trim();
+        const id  = p.getAttribute('id') || p.querySelector(':scope > id')?.textContent?.trim();
+        if (ref && id) productCache.set(ref, { id, price: p.querySelector('price')?.textContent || '0', taxGroupId: p.querySelector('id_tax_rules_group')?.textContent || '1' });
+      });
+    } catch (_) {}
+
+    onProgress('Pre-chargement categories...');
+    try {
+      const xml = await apiGetXml('/categories/?display=full');
+      parseXml(xml).querySelectorAll('category').forEach(c => {
+        const name = (c.querySelector('name > language') || c.querySelector('name'))?.textContent?.trim();
+        const id   = c.getAttribute('id') || c.querySelector(':scope > id')?.textContent?.trim();
+        if (name && id) categoryCache.set(name, id);
+      });
+    } catch (_) {}
+
+    onProgress('Pre-chargement taxes...');
+    try {
+      const [taxesXml, rulesXml] = await Promise.all([
+        apiGetXml('/taxes/?display=full'),
+        apiGetXml('/tax_rules/?display=full'),
+      ]);
+      const taxToGroup = new Map();
+      parseXml(rulesXml).querySelectorAll('tax_rule').forEach(r => {
+        const taxId   = r.querySelector('id_tax')?.textContent?.trim();
+        const groupId = r.querySelector('id_tax_rules_group')?.textContent?.trim();
+        if (taxId && groupId) taxToGroup.set(taxId, groupId);
+      });
+      parseXml(taxesXml).querySelectorAll('tax').forEach(t => {
+        const id   = t.getAttribute('id') || t.querySelector(':scope > id')?.textContent?.trim();
+        const rate = parseFloat((t.querySelector('rate')?.textContent || '').replace(',', '.'));
+        if (id && !Number.isNaN(rate)) {
+          const groupId = taxToGroup.get(id);
+          if (groupId) taxRateCacheRef.current.set(rate.toFixed(4), sanitizeTaxGroupId(groupId));
+        }
+      });
+    } catch (_) {}
+
+    onProgress('Pre-chargement attributs...');
+    try {
+      const [groupsXml, valuesXml] = await Promise.all([
+        apiGetXml('/product_options/?display=full'),
+        apiGetXml('/product_option_values/?display=full'),
+      ]);
+      parseXml(groupsXml).querySelectorAll('product_option').forEach(o => {
+        const name = (o.querySelector('name > language') || o.querySelector('name'))?.textContent?.trim();
+        const id   = o.getAttribute('id') || o.querySelector(':scope > id')?.textContent?.trim();
+        if (name && id) groupCache.set(name, id);
+      });
+      parseXml(valuesXml).querySelectorAll('product_option_value').forEach(v => {
+        const name    = (v.querySelector('name > language') || v.querySelector('name'))?.textContent?.trim();
+        const id      = v.getAttribute('id') || v.querySelector(':scope > id')?.textContent?.trim();
+        const groupId = v.querySelector('id_attribute_group')?.textContent?.trim();
+        if (name && id && groupId) valueCache.set(`${groupId}::${name}`, id);
+      });
+    } catch (_) {}
+
+    // Map pour dédupliquer les créations concurrentes de catégories
+    const pendingCategoryCreations = new Map();
+    const ensureCategoryIdSafe = async (name, cache) => {
+      const trimmed = String(name || '').trim();
+      if (!trimmed) return DEFAULT_CATEGORY_ID;
+      if (cache.has(trimmed)) return cache.get(trimmed);
+      if (pendingCategoryCreations.has(trimmed)) return pendingCategoryCreations.get(trimmed);
+      const p = ensureCategoryId(trimmed, cache);
+      pendingCategoryCreations.set(trimmed, p);
+      return p;
+    };
+
+    // ── Phase 2 : Construction du payload produits ───────────────────────────
+    const productPayload = []
+    const imageEntries   = [] // { reference, imageEntry }
+
     for (let i = 0; i < products.length; i++) {
-      const product = products[i];
-      const rowLabel = `Ligne ${i + 2}`;
+      const product = products[i]
+      onProgress(`Préparation produit ${i + 1}/${products.length}`)
       try {
-        const categoryId = normalizeCategoryId(product.categorie) || await ensureCategoryId(product.categorie, categoryCache);
+        const categoryId = normalizeCategoryId(product.categorie) || await ensureCategoryIdSafe(product.categorie, categoryCache)
+        const taxGroupId = sanitizeTaxGroupId(await ensureTaxGroupId(product.Taxe))
+        const priceHt    = convertPriceToHTMapped(product.prix_ttc, product.Taxe)
+        const wholesale  = normalizeNumber(String(product.prix_achat || '0').replace(',', '.')) || 0
 
-        // Créer le groupe TVA si inexistant AVANT de calculer les prix
-        const taxGroupId = sanitizeTaxGroupId(await ensureTaxGroupId(product.Taxe));
-        const taxRate    = getTaxRateFromGroupId(taxGroupId);
-        const priceHt    = convertPriceToHTMapped(product.prix_ttc, product.Taxe);
+        const refKey     = normalizeReferenceKey(product.reference)
+        const imageEntry = imagesByReference[refKey]
+        if (imageEntry) { importResults.images.total++; imageEntries.push({ reference: product.reference, imageEntry }) }
 
-        const refKey = normalizeReferenceKey(product.reference);
-        const imageEntry = imagesByReference[refKey];
-        if (imageEntry) importResults.images.total += 1;
-
-        const existing = await findProductByReference(product.reference);
-        if (existing) {
-          // Produit existant → corriger prix + groupe TVA via PUT
-          try {
-            const doc = parseXml(await apiGetXml(`/products/${existing.id}`));
-            const node = doc.querySelector('product');
-            if (node) {
-              stripReadOnlyFields(node);
-              const pn = node.querySelector('price'); if (pn) pn.textContent = String(priceHt);
-              const tn = node.querySelector('id_tax_rules_group') || (() => { const n = doc.createElement('id_tax_rules_group'); node.appendChild(n); return n; })();
-              tn.textContent = String(taxGroupId);
-              const sn = node.querySelector('state') || (() => { const n = doc.createElement('state'); node.appendChild(n); return n; })();
-              sn.textContent = DEFAULT_STATE;
-              await apiPutXml(`/products/${existing.id}`, serializeXml(doc));
-            }
-          } catch (putErr) {
-            importResults.products.errors.push({ row: rowLabel, name: product.nom, error: `Mise à jour échouée: ${putErr.message}` });
-          }
-          productCache.set(product.reference, { id: existing.id, priceHt, taxRate, taxGroupId });
-          if (imageEntry) {
-            const ok = await uploadProductImage(existing.id, imageEntry);
-            if (ok) importResults.images.success += 1;
-            else {
-              importResults.images.failed += 1;
-              importResults.images.errors.push({ row: rowLabel, name: product.nom, error: 'Upload image echoue (produit existant)' });
-            }
-          }
-          importResults.products.success++;
-          continue;
-        }
-
-        // Nouveau produit
-        const productId = await apiPostXml('/products/',
-          buildProductXML(product, categoryId, taxGroupId, priceHt, variantReferences.has(product.reference)),
-          'product'
-        );
-        productCache.set(product.reference, { id: productId, priceHt, taxRate, taxGroupId });
-        if (imageEntry) {
-          const ok = await uploadProductImage(productId, imageEntry);
-          if (ok) importResults.images.success += 1;
-          else {
-            importResults.images.failed += 1;
-            importResults.images.errors.push({ row: rowLabel, name: product.nom, error: 'Upload image echoue (nouveau produit)' });
-          }
-        }
-        importResults.products.success++;
+        productPayload.push({
+          reference:            product.reference,
+          nom:                  product.nom || '',
+          price_ht:             priceHt,
+          wholesale_price:      wholesale,
+          id_tax_rules_group:   taxGroupId,
+          id_category_default:  categoryId,
+          has_variants:         variantReferences.has(product.reference),
+          available_date:       normalizeDate(product.date_availability_produit || '') || '',
+        })
       } catch (err) {
-        importResults.products.failed++;
-        importResults.products.errors.push({ row: rowLabel, name: product.nom, error: err.message });
+        importResults.products.failed++
+        importResults.products.errors.push({ row: `Ligne ${i + 2}`, name: product.nom, error: err.message })
       }
     }
 
-    // ── Boucle variants ──────────────────────────────────────────────────
+    // ── Phase 3 : Construction du payload variants ────────────────────────────
+    const variantPayload = []
+
     for (let i = 0; i < variants.length; i++) {
-      const variant  = variants[i];
-      const rowLabel = `Ligne ${i + 2}`;
+      const variant    = variants[i]
+      const specificite = String(variant.specificite || '').trim()
+      const karazany    = String(variant.karazany    || '').trim()
+      const quantity    = normalizeInt(variant.stock_initial, 0)
+      onProgress(`Préparation déclinaison ${i + 1}/${variants.length}`)
+
+      if (!specificite || !karazany) {
+        variantPayload.push({ reference: variant.reference, specificite: '', karazany: '', stock_initial: quantity, price_impact_ht: 0, id_attribute_group: 0, id_attribute_value: 0, combo_reference: '' })
+        continue
+      }
+
       try {
-        let productInfo = productCache.get(variant.reference);
-        if (!productInfo) {
-          const ex = await findProductByReference(variant.reference);
-          if (ex) {
-            productInfo = { id: ex.id, priceHt: ex.price, taxRate: getTaxRateFromGroupId(ex.taxGroupId), taxGroupId: ex.taxGroupId };
-            productCache.set(variant.reference, productInfo);
-          }
-        }
-        if (!productInfo) throw new Error('Produit introuvable pour cette reference');
+        const groupId = await ensureAttributeGroupId(specificite, groupCache)
+        const valueId = await ensureAttributeValueId(groupId, karazany, valueCache)
+        if (!valueId) throw new Error('Valeur attribut non créée')
 
-        const specificite = String(variant.specificite || '').trim();
-        const karazany    = String(variant.karazany    || '').trim();
-        const quantity    = normalizeInt(variant.stock_initial, '0');
+        const prodEntry    = productPayload.find(p => p.reference === variant.reference)
+        const taxRate      = prodEntry ? (getTaxRateFromGroupId(prodEntry.id_tax_rules_group) || 0) : 0
+        const pttc         = normalizeNumber(String(variant.prix_vente_ttc || '0').replace(',', '.'))
+        const comboPriceHt = (!Number.isNaN(pttc) && pttc > 0) ? pttc / (1 + taxRate / 100) : (parseFloat(prodEntry?.price_ht || 0))
+        const priceImpact  = parseFloat((comboPriceHt - parseFloat(prodEntry?.price_ht || 0)).toFixed(6))
 
-        if (!specificite || !karazany) {
-          // Pas de déclinaison → stock de base (id_product_attribute=0)
-          if (quantity !== '0') {
-            let lastErr = null;
-            for (let attempt = 0; attempt < 5; attempt++) {
-              try { await setStockQuantity(productInfo.id, '0', quantity); lastErr = null; break; }
-              catch (e) { lastErr = e; await new Promise(r => setTimeout(r, 1000)); }
-            }
-            if (lastErr) throw lastErr;
-          }
-          importResults.variants.success++;
-          continue;
-        }
-
-        const groupId  = await ensureAttributeGroupId(specificite, groupCache);
-        const valueId  = await ensureAttributeValueId(groupId, karazany, valueCache);
-        if (!valueId) throw new Error('Valeur attribut non créée');
-
-        const taxRate     = productInfo.taxRate || 0;
-        const pttc        = normalizeNumber(String(variant.prix_vente_ttc || '').replace(',', '.'));
-        const comboPriceHt = (!Number.isNaN(pttc) && pttc > 0)
-          ? (pttc / (1 + taxRate / 100)).toFixed(6)
-          : productInfo.priceHt;
-        const priceImpact = (parseFloat(comboPriceHt) - parseFloat(productInfo.priceHt)).toFixed(6);
-
-        if (!combinationsUpdated.has(productInfo.id)) {
-          await ensureProductTypeCombinations(productInfo.id);
-          combinationsUpdated.add(productInfo.id);
-          try { await setStockQuantity(productInfo.id, '0', '0'); } catch (_) {}
-        }
-
-        const comboXml = [
-          '<?xml version="1.0" encoding="UTF-8"?>',
-          '<prestashop xmlns:xlink="http://www.w3.org/1999/xlink">',
-          '  <combination>',
-          `    <id_product>${productInfo.id}</id_product>`,
-          `    <reference>${escapeXml(`${variant.reference}-${slugify(karazany)}`)}</reference>`,
-          `    <price>${priceImpact}</price>`,
-          `    <minimal_quantity>${DEFAULT_MINIMAL_QUANTITY}</minimal_quantity>`,
-          '    <associations><product_option_values><product_option_value>',
-          `      <id>${valueId}</id>`,
-          '    </product_option_value></product_option_values></associations>',
-          '  </combination>',
-          '</prestashop>',
-        ].join('\n');
-        const comboId = await apiPostXml('/combinations/', comboXml, 'combination');
-
-        if (!firstComboByProduct.has(productInfo.id)) firstComboByProduct.set(productInfo.id, comboId);
-        if (quantity !== '0') await setStockQuantity(productInfo.id, comboId, quantity);
-
-        importResults.variants.success++;
+        variantPayload.push({
+          reference:          variant.reference,
+          specificite,
+          karazany,
+          stock_initial:      quantity,
+          price_impact_ht:    priceImpact,
+          id_attribute_group: groupId,
+          id_attribute_value: valueId,
+          combo_reference:    `${variant.reference}-${slugify(karazany)}`,
+        })
       } catch (err) {
-        importResults.variants.failed++;
-        importResults.variants.errors.push({ row: rowLabel, name: variant.reference, error: err.message });
+        importResults.variants.failed++
+        importResults.variants.errors.push({ row: `Ligne ${i + 2}`, name: variant.reference, error: err.message })
       }
     }
 
-    // Rafraîchir le cache PS pour affichage correct des déclinaisons en front
-    for (const [productId, firstComboId] of firstComboByProduct.entries()) {
-      await refreshProductCombinationsCache(productId, firstComboId);
+    // ── Phase 4 : Un seul appel PHP bulk ─────────────────────────────────────
+    onProgress('Import en cours (traitement serveur)...')
+    try {
+      const { baseUrl, token } = getApiConfig()
+      const psBase = baseUrl.replace(/\/api\/?$/, '')
+      const params = new URLSearchParams({ fc: 'module', module: 'stockapi', controller: 'import' })
+      if (token) params.set('ws_key', token)
+
+      const res = await fetch(`${psBase}/index.php?${params}`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ products: productPayload, variants: variantPayload }),
+      })
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+
+      if (data.ok && data.results) {
+        importResults.products.success += data.results.products.success
+        importResults.products.failed  += data.results.products.failed
+        importResults.products.errors.push(...data.results.products.errors)
+        importResults.variants.success += data.results.variants.success
+        importResults.variants.failed  += data.results.variants.failed
+        importResults.variants.errors.push(...data.results.variants.errors)
+      }
+
+      // ── Phase 5 : Upload images ─────────────────────────────────────────────
+      const productIds = data.product_ids || {}
+      for (const { reference, imageEntry } of imageEntries) {
+        const pid = productIds[reference]
+        if (!pid) continue
+        onProgress(`Image: ${reference}`)
+        const ok = await uploadProductImage(pid, imageEntry)
+        if (ok) importResults.images.success++
+        else { importResults.images.failed++; importResults.images.errors.push({ row: reference, name: reference, error: 'Upload image échoué' }) }
+      }
+    } catch (err) {
+      importResults.products.errors.push({ row: 'Import', name: 'Endpoint PHP', error: err.message })
     }
 
     return importResults;
   };
 
-  const importOrdersCsv = async () => {
+  const importOrdersCsv = async (onProgress = () => {}) => {
     const summary = { total: ordersRows.length, success: 0, failed: 0, cartsOnly: 0, errors: [] };
     const customerCache = new Map();
     const carrierId = await resolveCarrierId();
@@ -1394,6 +1453,7 @@ export default function CSVImportPage() {
         summary.failed++;
         summary.errors.push({ row: rowLabel, email: row.email, error: `${err.message} (etape: ${stage})` });
       }
+      onProgress(`Commande ${i + 1}/${ordersRows.length}`);
     }
 
     return summary;
@@ -1412,11 +1472,17 @@ export default function CSVImportPage() {
     setResults(null);
     setOrderImportResults(null);
 
+    const prefetchSteps = hasCatalogCsv ? 4 : 0;
+    const total = prefetchSteps + (hasCatalogCsv ? products.length + variants.length : 0) + (hasOrdersCsv ? ordersRows.length : 0);
+    let done = 0;
+    setProgress({ done: 0, total, label: 'Demarrage...' });
+    const onProgress = (label) => { done += 1; setProgress({ done, total, label }); };
+
     const importErrors = [];
 
     if (hasCatalogCsv) {
       try {
-        const catalogResults = await importCatalogCsv();
+        const catalogResults = await importCatalogCsv(onProgress);
         setResults(catalogResults);
       } catch (err) {
         importErrors.push(`Import produits/declinaisons: ${err.message}`);
@@ -1425,7 +1491,7 @@ export default function CSVImportPage() {
 
     if (hasOrdersCsv) {
       try {
-        const ordersResults = await importOrdersCsv();
+        const ordersResults = await importOrdersCsv(onProgress);
         setOrderImportResults(ordersResults);
       } catch (err) {
         importErrors.push(`Import commandes: ${err.message}`);
@@ -1565,15 +1631,35 @@ export default function CSVImportPage() {
       )}
 
       <div className="bo-card" style={{ marginBottom: '2rem' }}>
-        <button className="bo-button" onClick={handleImport} disabled={importing}>
-          {importing ? 'Import en cours...' : 'Importer tous les CSV'}
-        </button>
-        <button className="bo-button" onClick={handleVerify} disabled={importing} style={{ marginLeft: '0.5rem' }}>
-          Verifier import
-        </button>
-        <button className="bo-button" onClick={handleReset} disabled={importing} style={{ marginLeft: '0.5rem', backgroundColor: '#999' }}>
-          Reinitialiser
-        </button>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: importing ? '1rem' : 0 }}>
+          <button className="bo-button" onClick={handleImport} disabled={importing}>
+            {importing ? 'Import en cours...' : 'Importer tous les CSV'}
+          </button>
+          <button className="bo-button" onClick={handleVerify} disabled={importing}>
+            Verifier import
+          </button>
+          <button className="bo-button" onClick={handleReset} disabled={importing} style={{ backgroundColor: '#999' }}>
+            Reinitialiser
+          </button>
+        </div>
+
+        {importing && (
+          <div>
+            <div style={{ background: '#e2e8f0', borderRadius: '8px', height: '10px', overflow: 'hidden' }}>
+              <div style={{
+                width: `${progress.total > 0 ? Math.min(100, Math.round((progress.done / progress.total) * 100)) : 0}%`,
+                background: 'var(--primary)',
+                height: '100%',
+                borderRadius: '8px',
+                transition: 'width 0.25s ease',
+              }} />
+            </div>
+            <p style={{ fontSize: '13px', color: 'var(--muted)', margin: '6px 0 0' }}>
+              {progress.label} — {progress.done}/{progress.total}
+              {progress.total > 0 ? ` (${Math.min(100, Math.round((progress.done / progress.total) * 100))}%)` : ''}
+            </p>
+          </div>
+        )}
       </div>
 
       {results && (

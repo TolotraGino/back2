@@ -38,13 +38,9 @@ class StockapiUpdateModuleFrontController extends ModuleFrontController
             die(json_encode(['error' => 'qty doit etre un entier positif']));
         }
 
-        $qtyBefore = (int) StockAvailable::getQuantityAvailableByProduct($idProduct, $idProductAttribute);
-
-        StockAvailable::updateQuantity($idProduct, $idProductAttribute, $delta);
+        StockAvailable::updateQuantity($idProduct, $idProductAttribute, $delta, null, true);
 
         $newQty = (int) StockAvailable::getQuantityAvailableByProduct($idProduct, $idProductAttribute);
-
-        $this->recordStockMovement($idProduct, $idProductAttribute, $delta, $qtyBefore);
 
         die(json_encode([
             'success'    => true,
@@ -52,34 +48,6 @@ class StockapiUpdateModuleFrontController extends ModuleFrontController
             'delta'      => $delta,
             'quantity'   => $newQty,
         ]));
-    }
-
-    private function recordStockMovement($idProduct, $idProductAttribute, $delta, $qtyBefore)
-    {
-        // PS back-office joins stock_mvt.id_stock = stock_available.id_stock_available
-        $saRow = Db::getInstance()->getRow(
-            'SELECT id_stock_available FROM ' . _DB_PREFIX_ . 'stock_available
-             WHERE id_product = ' . (int) $idProduct . '
-             AND id_product_attribute = ' . (int) $idProductAttribute
-        );
-        $idStockAvailable = $saRow ? (int) $saRow['id_stock_available'] : 0;
-
-        Db::getInstance()->insert('stock_mvt', [
-            'id_stock'            => $idStockAvailable,
-            'id_order'            => null,
-            'id_supply_order'     => null,
-            'id_stock_mvt_reason' => 1,
-            'id_employee'         => 0,
-            'employee_lastname'   => pSQL('API'),
-            'employee_firstname'  => pSQL('Stock'),
-            'physical_quantity'   => (int) $delta,
-            'sign'                => 1,
-            'price_te'            => 0,
-            'last_wa'             => (int) $qtyBefore,
-            'current_wa'          => (int) ($qtyBefore + $delta),
-            'referer'             => (int) $idProduct,
-            'date_add'            => date('Y-m-d H:i:s'),
-        ]);
     }
 
     private function resolveWsKey()

@@ -130,16 +130,27 @@ async function fetchAllProducts() {
 async function fetchAllStockAvailables() {
   const xml = await apiGetXml('/stock_availables/?display=full')
   const doc = parseXml(xml)
-  const map = new Map()
+  const map = new Map() // productId → Array<{stockId, quantity, attrId}>
   doc.querySelectorAll('stock_available').forEach((s) => {
     const productId = getXmlText(s, 'id_product')
     const attrId = getXmlText(s, 'id_product_attribute') || '0'
-    if (attrId === '0' && !map.has(productId)) {
-      map.set(productId, {
-        stockId: s.getAttribute('id') || getXmlText(s, 'id'),
-        quantity: normalizeInt(getXmlText(s, 'quantity'), 0),
-      })
-    }
+    const stockId = s.getAttribute('id') || getXmlText(s, 'id')
+    const quantity = normalizeInt(getXmlText(s, 'quantity'), 0)
+    if (!map.has(productId)) map.set(productId, [])
+    map.get(productId).push({ stockId, quantity, attrId })
+  })
+  return map
+}
+
+async function fetchAllCombinations() {
+  const xml = await apiGetXml('/combinations/?display=full')
+  const doc = parseXml(xml)
+  const map = new Map() // comboId → { reference, productId }
+  doc.querySelectorAll('combination').forEach((c) => {
+    const id = c.getAttribute('id') || getXmlText(c, 'id')
+    const reference = getXmlText(c, 'reference') || ''
+    const productId = getXmlText(c, 'id_product')
+    if (id) map.set(id, { reference, productId })
   })
   return map
 }
@@ -247,7 +258,10 @@ function StockPage() {
     const q = searchFilter.toLowerCase().trim()
     if (!q) return allProducts
     return allProducts.filter(
-      (p) => p.name.toLowerCase().includes(q) || p.reference.toLowerCase().includes(q)
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.reference.toLowerCase().includes(q) ||
+        (p.variants || []).some((v) => v.comboReference.toLowerCase().includes(q))
     )
   }, [allProducts, searchFilter])
 
@@ -255,10 +269,30 @@ function StockPage() {
     setLoadingAll(true)
     setAllError('')
     try {
-      const [products, stockMap] = await Promise.all([fetchAllProducts(), fetchAllStockAvailables()])
+      const [products, stockMap, comboMap] = await Promise.all([
+        fetchAllProducts(),
+        fetchAllStockAvailables(),
+        fetchAllCombinations(),
+      ])
       const merged = products.map((p) => {
-        const s = stockMap.get(p.id)
-        return { ...p, quantity: s ? s.quantity : null, stockId: s ? s.stockId : null }
+        const stocks = stockMap.get(p.id) || []
+        const baseStock = stocks.find((s) => s.attrId === '0')
+        const comboStocks = stocks.filter((s) => s.attrId !== '0')
+        const variants = comboStocks.map((cs) => {
+          const combo = comboMap.get(cs.attrId)
+          return {
+            attrId: cs.attrId,
+            comboReference: combo?.reference || `Déclinaison ${cs.attrId}`,
+            quantity: cs.quantity,
+            stockId: cs.stockId,
+          }
+        })
+        return {
+          ...p,
+          quantity: baseStock ? baseStock.quantity : null,
+          stockId: baseStock ? baseStock.stockId : null,
+          variants,
+        }
       })
       setAllProducts(merged)
     } catch (err) {
@@ -296,6 +330,24 @@ function StockPage() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
     try {
       const combos = await fetchProductCombinations(p.id)
+      setCombinations(combos)
+    } catch {
+      setCombinations([])
+    }
+  }
+
+  const handleSelectVariant = async (product, variant) => {
+    setReference(product.reference)
+    setProductInfo({ id: product.id, idAttribute: variant.attrId, reference: product.reference, name: product.name })
+    setStockInfo({ quantity: variant.quantity })
+    setSelectedAttrId(variant.attrId)
+    setEvolProductId(product.id)
+    loadEvolHistory(product.id)
+    setError('')
+    setSuccess('')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+    try {
+      const combos = await fetchProductCombinations(product.id)
       setCombinations(combos)
     } catch {
       setCombinations([])
@@ -458,7 +510,22 @@ function StockPage() {
             </div>
           ) : null}
 
-          <p style={{ margin: '0.5rem 0 0' }}><strong>Stock actuel:</strong> {stockInfo.quantity}</p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', margin: '0.5rem 0 0' }}>
+            <p style={{ margin: 0 }}><strong>Stock actuel:</strong> {stockInfo.quantity}</p>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const qty = await getProductStock(productInfo.id, selectedAttrId)
+                  setStockInfo({ quantity: qty })
+                } catch { /* ignore */ }
+              }}
+              disabled={loading}
+              style={{ fontSize: '12px', padding: '3px 10px', cursor: 'pointer', background: '#f1f5f9', color: '#475569', border: '1px solid #cbd5e1', borderRadius: '6px' }}
+            >
+              ↻ Rafraîchir
+            </button>
+          </div>
 
           <div className="bo-reset__controls" style={{ marginTop: '0.75rem', flexWrap: 'wrap' }}>
             <input
@@ -621,43 +688,90 @@ function StockPage() {
             <div style={{ display: 'grid', gridTemplateColumns: '60px 1fr 1.5fr 90px 120px', gap: '12px', alignItems: 'center', fontWeight: 600, fontSize: '13px', color: 'var(--muted)', borderBottom: '1px solid var(--border)', paddingBottom: '8px', marginBottom: '6px', minWidth: '520px' }}>
               <span>ID</span>
               <span>Reference</span>
-              <span>Nom</span>
+              <span>Nom / Déclinaison</span>
               <span style={{ textAlign: 'right' }}>Stock</span>
               <span></span>
             </div>
-            <div style={{ display: 'grid', gap: '6px', minWidth: '520px' }}>
-              {filteredProducts.map((p) => (
-                <div
-                  key={p.id}
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: '60px 1fr 1.5fr 90px 120px',
-                    gap: '12px',
-                    alignItems: 'center',
-                    background: productInfo?.id === p.id ? '#edf7f5' : '#fff',
-                    border: `1px solid ${productInfo?.id === p.id ? 'var(--primary)' : 'var(--border)'}`,
-                    borderRadius: '10px',
-                    padding: '10px 12px',
-                    fontSize: '14px',
-                    boxShadow: '0 4px 10px rgba(15,23,42,0.05)',
-                  }}
-                >
-                  <span className="bo-muted">{p.id}</span>
-                  <span style={{ fontFamily: 'monospace', fontSize: '13px' }}>{p.reference || '-'}</span>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name || '-'}</span>
-                  <span style={{ textAlign: 'right', fontWeight: 600, color: p.quantity === 0 ? '#b91c1c' : p.quantity === null ? 'var(--muted)' : 'var(--text)' }}>
-                    {p.quantity === null ? '-' : p.quantity}
-                  </span>
-                  <button
-                    type="button"
-                    className="bo-button"
-                    style={{ fontSize: '12px', padding: '6px 10px' }}
-                    onClick={() => handleSelectProduct(p)}
-                  >
-                    Selectionner
-                  </button>
-                </div>
-              ))}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: '520px' }}>
+              {filteredProducts.map((p) => {
+                const isSelected = productInfo?.id === p.id
+                const hasVariants = p.variants && p.variants.length > 0
+                return (
+                  <div key={p.id}>
+                    {/* Ligne produit */}
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '60px 1fr 1.5fr 90px 120px',
+                        gap: '12px',
+                        alignItems: 'center',
+                        background: isSelected ? '#edf7f5' : '#fff',
+                        border: `1px solid ${isSelected ? 'var(--primary)' : 'var(--border)'}`,
+                        borderRadius: hasVariants ? '10px 10px 0 0' : '10px',
+                        padding: '10px 12px',
+                        fontSize: '14px',
+                        boxShadow: '0 4px 10px rgba(15,23,42,0.05)',
+                      }}
+                    >
+                      <span className="bo-muted">{p.id}</span>
+                      <span style={{ fontFamily: 'monospace', fontSize: '13px' }}>{p.reference || '-'}</span>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: hasVariants ? 600 : 400 }}>
+                        {p.name || '-'}
+                        {hasVariants && <span className="bo-muted" style={{ fontWeight: 400, marginLeft: '6px', fontSize: '12px' }}>({p.variants.length} décl.)</span>}
+                      </span>
+                      <span style={{ textAlign: 'right', fontWeight: 600, color: 'var(--muted)', fontSize: '12px' }}>
+                        {hasVariants ? '—' : (p.quantity === null ? '-' : <span style={{ color: p.quantity === 0 ? '#b91c1c' : 'var(--text)' }}>{p.quantity}</span>)}
+                      </span>
+                      <button
+                        type="button"
+                        className="bo-button"
+                        style={{ fontSize: '12px', padding: '6px 10px' }}
+                        onClick={() => handleSelectProduct(p)}
+                      >
+                        Selectionner
+                      </button>
+                    </div>
+
+                    {/* Lignes déclinaisons */}
+                    {hasVariants && p.variants.map((v, vi) => {
+                      const isLastVariant = vi === p.variants.length - 1
+                      const isVariantSelected = isSelected && productInfo?.idAttribute === v.attrId
+                      return (
+                        <div
+                          key={v.attrId}
+                          style={{
+                            display: 'grid',
+                            gridTemplateColumns: '60px 1fr 1.5fr 90px 120px',
+                            gap: '12px',
+                            alignItems: 'center',
+                            background: isVariantSelected ? '#d1fae5' : '#f8fafc',
+                            border: `1px solid ${isVariantSelected ? 'var(--primary)' : 'var(--border)'}`,
+                            borderTop: 'none',
+                            borderRadius: isLastVariant ? '0 0 10px 10px' : '0',
+                            padding: '8px 12px 8px 28px',
+                            fontSize: '13px',
+                          }}
+                        >
+                          <span></span>
+                          <span style={{ fontFamily: 'monospace', fontSize: '12px', color: 'var(--muted)' }}>↳ {v.comboReference || `Décl. ${v.attrId}`}</span>
+                          <span></span>
+                          <span style={{ textAlign: 'right', fontWeight: 700, color: v.quantity === 0 ? '#b91c1c' : '#166534' }}>
+                            {v.quantity}
+                          </span>
+                          <button
+                            type="button"
+                            className="bo-button"
+                            style={{ fontSize: '11px', padding: '4px 8px', background: 'var(--border)', color: 'var(--text)', border: 'none' }}
+                            onClick={() => handleSelectVariant(p, v)}
+                          >
+                            ↗ Gérer
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )
+              })}
             </div>
           </div>
         )}

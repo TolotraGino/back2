@@ -5,6 +5,7 @@ import OrdersPage from './OrdersPage.jsx'
 import CSVImportPage from './CSVImportPage.jsx'
 import DashboardStatsPage from './DashboardStatsPage.jsx'
 import StockPage from './StockPage.jsx'
+import ProfitStatsPage from './ProfitStatsPage.jsx'
 
 function Dashboard({ onLogout, initialPage = 'reset' }) {
   const [apiStatus, setApiStatus] = useState(null)
@@ -62,6 +63,13 @@ function Dashboard({ onLogout, initialPage = 'reset' }) {
           >
             Gestion stock
           </button>
+          <button
+            type="button"
+            className={`bo-nav-item ${activePage === 'profit' ? 'is-active' : ''}`}
+            onClick={() => setActivePage('profit')}
+          >
+            Bénéfices
+          </button>
         </nav>
 
         <div className="bo-sidebar__section">
@@ -94,6 +102,7 @@ function Dashboard({ onLogout, initialPage = 'reset' }) {
       {activePage === 'stats' && <DashboardStatsPage />}
       {activePage === 'csv' && <CSVImportPage />}
       {activePage === 'stock' && <StockPage />}
+      {activePage === 'profit' && <ProfitStatsPage />}
     </main>
   )
 }
